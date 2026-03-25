@@ -2,9 +2,11 @@ package ssh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/wentf9/xops-cli/pkg/config"
@@ -12,6 +14,7 @@ import (
 	"github.com/wentf9/xops-cli/pkg/utils/concurrent"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -91,7 +94,7 @@ func (c *Connector) Connect(ctx context.Context, nodeName string) (*Client, erro
 		}
 
 		// 4. 构建目标 SSH 配置 (认证信息)
-		sshConfig, cleanup, err := c.buildSSHConfig(identity)
+		sshConfig, cleanup, err := c.buildSSHConfig(identity, host.Address)
 		if err != nil {
 			return nil, fmt.Errorf("failed to build ssh config for '%s': %w", nodeName, err)
 		}
@@ -138,12 +141,17 @@ func (c *Connector) CloseAll() {
 }
 
 // buildSSHConfig 根据 Identity 模型构建 ssh.ClientConfig
-func (c *Connector) buildSSHConfig(id models.Identity) (*ssh.ClientConfig, func(), error) {
+func (c *Connector) buildSSHConfig(id models.Identity, hostAddr string) (*ssh.ClientConfig, func(), error) {
 	var cleanup func()
 	authMethods := []ssh.AuthMethod{}
 
 	// 根据 AuthType 处理不同的认证方式
 	switch id.AuthType {
+	case "auto":
+		var autoCleanup func()
+		authMethods, autoCleanup = BuildAutoAuthMethods(id.User, hostAddr, id.KeyPath)
+		cleanup = autoCleanup
+
 	case "password":
 		if id.Password == "" {
 			return nil, nil, fmt.Errorf("auth type is password but password is empty")
@@ -154,18 +162,14 @@ func (c *Connector) buildSSHConfig(id models.Identity) (*ssh.ClientConfig, func(
 		if id.KeyPath == "" {
 			return nil, nil, fmt.Errorf("auth type is key but key_path is empty")
 		}
-		// 读取私钥文件
 		keyBytes, err := os.ReadFile(expandHomeDir(id.KeyPath))
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read key file: %w", err)
 		}
-
 		var signer ssh.Signer
 		if id.Passphrase != "" {
-			// 有密码的私钥
 			signer, err = ssh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(id.Passphrase))
 		} else {
-			// 无密码的私钥
 			signer, err = ssh.ParsePrivateKey(keyBytes)
 		}
 		if err != nil {
@@ -182,13 +186,9 @@ func (c *Connector) buildSSHConfig(id models.Identity) (*ssh.ClientConfig, func(
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to connect to ssh-agent: %w", err)
 		}
-
 		agentClient := agent.NewClient(conn)
 		authMethods = append(authMethods, ssh.PublicKeysCallback(agentClient.Signers))
-
-		cleanup = func() {
-			_ = conn.Close()
-		}
+		cleanup = func() { _ = conn.Close() }
 
 	default:
 		return nil, nil, fmt.Errorf("unsupported auth type: %s", id.AuthType)
@@ -197,7 +197,7 @@ func (c *Connector) buildSSHConfig(id models.Identity) (*ssh.ClientConfig, func(
 	return &ssh.ClientConfig{
 		User:            id.User,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: 生产环境应集成 known_hosts 检查
+		HostKeyCallback: getHostKeyCallback(),
 		Timeout:         15 * time.Second,
 	}, cleanup, nil
 }
@@ -207,8 +207,66 @@ func expandHomeDir(path string) string {
 	if len(path) > 0 && path[0] == '~' {
 		home, err := os.UserHomeDir()
 		if err == nil {
-			return home + path[1:]
+			return filepath.Join(home, path[1:])
 		}
 	}
 	return path
+}
+
+func getHostKeyCallback() ssh.HostKeyCallback {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ssh.InsecureIgnoreHostKey()
+	}
+	knownHostsFile := filepath.Join(home, ".ssh", "known_hosts")
+
+	if _, err := os.Stat(knownHostsFile); os.IsNotExist(err) {
+		_ = os.MkdirAll(filepath.Dir(knownHostsFile), 0700)
+		_ = os.WriteFile(knownHostsFile, []byte(""), 0600)
+	}
+
+	hostKeyCallback, err := knownhosts.New(knownHostsFile)
+	if err != nil {
+		return ssh.InsecureIgnoreHostKey()
+	}
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := hostKeyCallback(hostname, remote, key)
+		if err == nil {
+			return nil
+		}
+
+		var keyErr *knownhosts.KeyError
+		if errors.As(err, &keyErr) {
+			if len(keyErr.Want) > 0 {
+				fmt.Printf("\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n" +
+					"@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n" +
+					"@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n" +
+					"IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\n")
+				return err
+			}
+
+			// Unknown host
+			fmt.Printf("The authenticity of host '%s' can't be established.\n", hostname)
+			fingerprint := ssh.FingerprintSHA256(key)
+			fmt.Printf("%s key fingerprint is %s.\n", key.Type(), fingerprint)
+			fmt.Print("Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
+
+			var response string
+			_, _ = fmt.Scanln(&response)
+			if response != "yes" && response != fingerprint {
+				return fmt.Errorf("host key verification failed")
+			}
+
+			// Append to known_hosts
+			f, err := os.OpenFile(knownHostsFile, os.O_APPEND|os.O_WRONLY, 0600)
+			if err == nil {
+				defer func() { _ = f.Close() }()
+				line := knownhosts.Line([]string{knownhosts.Normalize(hostname)}, key)
+				_, _ = f.WriteString(line + "\n")
+			}
+			return nil
+		}
+		return err
+	}
 }

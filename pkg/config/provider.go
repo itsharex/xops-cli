@@ -12,6 +12,7 @@ import (
 type Provider struct {
 	cfg         *Configuration
 	lookupIndex *concurrent.Map[string, string]
+	openSSH     *OpenSSHParser
 }
 
 // NewProvider 创建一个新的配置提供者实例
@@ -19,6 +20,7 @@ func NewProvider(cfg *Configuration) ConfigProvider {
 	provider := Provider{
 		cfg:         cfg,
 		lookupIndex: concurrent.NewMap[string, string](concurrent.HashString),
+		openSSH:     NewOpenSSHParser(),
 	}
 	provider.init()
 	return provider
@@ -95,7 +97,11 @@ func (cp Provider) FindAlias(alias string) string {
 	if alias == "" {
 		return ""
 	}
-	return cp.Find(alias)
+	// 针对别名冲突检测，只检查内部 xops 节点，不检查 ssh_config 兜底节点
+	if nodeID, ok := cp.lookupIndex.Get(alias); ok {
+		return nodeID
+	}
+	return ""
 }
 
 func (cp Provider) GetNode(nodeID string) (models.Node, bool) {
