@@ -56,26 +56,30 @@ func NewCmdScp() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&o.Host, "host", "H", "", i18n.T("flag_hosts"))
+	// OpenSSH-compatible flags
 	cmd.Flags().Uint16VarP(&o.Port, "port", "p", 0, i18n.T("flag_port"))
-	cmd.Flags().StringVarP(&o.User, "user", "u", "", i18n.T("flag_user"))
-	cmd.Flags().StringVarP(&o.Password, "password", "P", "", i18n.T("flag_password"))
-	cmd.Flags().StringVarP(&o.KeyFile, "key", "i", "", i18n.T("flag_key"))
-	cmd.Flags().StringVarP(&o.KeyPass, "key_pass", "w", "", i18n.T("flag_key_pass"))
-	cmd.Flags().StringVarP(&o.JumpHost, "jump", "j", "", i18n.T("flag_jump"))
-	cmd.Flags().StringVarP(&o.Alias, "alias", "a", "", i18n.T("flag_alias"))
+	cmd.Flags().StringVarP(&o.User, "login", "l", "", i18n.T("flag_login"))
+	cmd.Flags().StringVarP(&o.IdentityFile, "identity", "i", "", i18n.T("flag_identity"))
+	cmd.Flags().StringVarP(&o.JumpHost, "jump", "J", "", i18n.T("flag_jump"))
+	cmd.Flags().BoolVarP(&o.Recursive, "recursive", "r", false, i18n.T("flag_recursive"))
 
+	// xops-enhanced flags (long-form only, no short flags to avoid OpenSSH conflicts)
+	cmd.Flags().StringVar(&o.Host, "host", "", i18n.T("flag_hosts"))
+	cmd.Flags().StringVar(&o.Password, "password", "", i18n.T("flag_password"))
+	cmd.Flags().StringVar(&o.Passphrase, "passphrase", "", i18n.T("flag_passphrase"))
+	cmd.Flags().StringVar(&o.Alias, "alias", "", i18n.T("flag_alias"))
+
+	// scp-specific flags
 	cmd.Flags().StringVar(&o.Source, "src", "", i18n.T("flag_scp_src"))
 	cmd.Flags().StringVar(&o.Dest, "dest", "", i18n.T("flag_scp_dest"))
 	cmd.Flags().StringVarP(&o.HostFile, "ifile", "I", "", i18n.T("flag_ifile"))
-	cmd.Flags().StringVarP(&o.Tag, "tag", "t", "", i18n.T("flag_scp_tag"))
-	cmd.Flags().BoolVarP(&o.Recursive, "recursive", "r", false, i18n.T("flag_recursive"))
+	cmd.Flags().StringVar(&o.Tag, "tag", "", i18n.T("flag_scp_tag"))
 	cmd.Flags().BoolVarP(&o.Progress, "progress", "v", false, i18n.T("flag_progress"))
 	cmd.Flags().BoolVarP(&o.Force, "force", "f", false, i18n.T("flag_force"))
 	cmd.Flags().IntVar(&o.TaskCount, "task", 3, i18n.T("flag_task"))
 	cmd.Flags().IntVar(&o.ThreadCount, "thread", 4, i18n.T("flag_thread"))
 
-	cmd.MarkFlagsMutuallyExclusive("password", "key")
+	cmd.MarkFlagsMutuallyExclusive("password", "identity")
 	cmd.MarkFlagsMutuallyExclusive("host", "ifile", "tag")
 	return cmd
 }
@@ -484,14 +488,14 @@ func (o *ScpOptions) createNewNode(provider config.ConfigProvider, host, user st
 		password = o.Password
 	}
 
-	if password == "" && o.KeyFile == "" {
+	if password == "" && o.IdentityFile == "" {
 		identity.AuthType = "auto"
 	} else if password != "" {
 		identity.Password = password
 		identity.AuthType = "password"
-	} else if o.KeyFile != "" {
-		identity.KeyPath = cmdutils.ToAbsolutePath(o.KeyFile)
-		identity.Passphrase = o.KeyPass
+	} else if o.IdentityFile != "" {
+		identity.KeyPath = cmdutils.ToAbsolutePath(o.IdentityFile)
+		identity.Passphrase = o.Passphrase
 		identity.AuthType = "key"
 	}
 
@@ -518,8 +522,8 @@ func (o *ScpOptions) updateNode(nodeID string, provider config.ConfigProvider, s
 			identity.AuthType = "password"
 			updated = true
 		}
-	} else if o.KeyFile != "" {
-		absKeyPath := cmdutils.ToAbsolutePath(o.KeyFile)
+	} else if o.IdentityFile != "" {
+		absKeyPath := cmdutils.ToAbsolutePath(o.IdentityFile)
 		if identity.KeyPath != absKeyPath || identity.AuthType != "key" {
 			identity.KeyPath = absKeyPath
 			identity.AuthType = "key"
@@ -527,9 +531,9 @@ func (o *ScpOptions) updateNode(nodeID string, provider config.ConfigProvider, s
 		}
 	}
 
-	if o.KeyPass != "" {
-		if identity.Passphrase != o.KeyPass {
-			identity.Passphrase = o.KeyPass
+	if o.Passphrase != "" {
+		if identity.Passphrase != o.Passphrase {
+			identity.Passphrase = o.Passphrase
 			updated = true
 		}
 	}

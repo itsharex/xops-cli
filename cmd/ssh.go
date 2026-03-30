@@ -22,8 +22,8 @@ type SshOptions struct {
 	Port           uint16
 	User           string
 	Password       string
-	KeyFile        string
-	KeyPass        string
+	IdentityFile   string
+	Passphrase     string
 	Sudo           bool
 	Alias          string
 	JumpHost       string
@@ -54,20 +54,24 @@ func NewCmdSsh() *cobra.Command {
 			return o.Run()
 		},
 	}
-	cmd.Flags().StringVarP(&o.Host, "host", "H", "", i18n.T("flag_host"))
+	// OpenSSH-compatible flags
 	cmd.Flags().Uint16VarP(&o.Port, "port", "p", 0, i18n.T("flag_port"))
-	cmd.Flags().StringVarP(&o.User, "user", "u", "", i18n.T("flag_user"))
-	cmd.Flags().StringVarP(&o.Password, "password", "P", "", i18n.T("flag_password"))
-	cmd.Flags().StringVarP(&o.KeyFile, "key", "i", "", i18n.T("flag_key"))
-	cmd.Flags().StringVarP(&o.KeyPass, "key_pass", "w", "", i18n.T("flag_key_pass"))
-	cmd.Flags().BoolVarP(&o.Sudo, "sudo", "s", false, i18n.T("flag_sudo"))
-	cmd.Flags().StringVarP(&o.JumpHost, "jump", "j", "", i18n.T("flag_jump"))
-	cmd.Flags().StringVarP(&o.Alias, "alias", "a", "", i18n.T("flag_alias"))
-	cmd.Flags().StringSliceVarP(&o.Tags, "tag", "t", []string{}, i18n.T("flag_tag"))
+	cmd.Flags().StringVarP(&o.User, "login", "l", "", i18n.T("flag_login"))
+	cmd.Flags().StringVarP(&o.IdentityFile, "identity", "i", "", i18n.T("flag_identity"))
+	cmd.Flags().StringVarP(&o.JumpHost, "jump", "J", "", i18n.T("flag_jump"))
 	cmd.Flags().StringSliceVarP(&o.LocalForwards, "local-forward", "L", []string{}, i18n.T("flag_local_forward"))
 	cmd.Flags().StringSliceVarP(&o.RemoteForwards, "remote-forward", "R", []string{}, i18n.T("flag_remote_forward"))
 	cmd.Flags().BoolVarP(&o.NoCmd, "no-cmd", "N", false, i18n.T("flag_no_cmd"))
-	cmd.MarkFlagsMutuallyExclusive("password", "key")
+
+	// xops-enhanced flags (long-form only, no short flags to avoid OpenSSH conflicts)
+	cmd.Flags().StringVar(&o.Host, "host", "", i18n.T("flag_host"))
+	cmd.Flags().StringVar(&o.Password, "password", "", i18n.T("flag_password"))
+	cmd.Flags().StringVar(&o.Passphrase, "passphrase", "", i18n.T("flag_passphrase"))
+	cmd.Flags().BoolVar(&o.Sudo, "sudo", false, i18n.T("flag_sudo"))
+	cmd.Flags().StringVar(&o.Alias, "alias", "", i18n.T("flag_alias"))
+	cmd.Flags().StringSliceVar(&o.Tags, "tag", []string{}, i18n.T("flag_tag"))
+
+	cmd.MarkFlagsMutuallyExclusive("password", "identity")
 	return cmd
 }
 
@@ -290,13 +294,13 @@ func updateIdentityFields(identity *models.Identity, o *SshOptions) bool {
 		identity.Password = o.Password
 		identity.AuthType = "password"
 		identityUpdated = true
-	} else if o.KeyFile != "" {
-		identity.KeyPath = utils.ToAbsolutePath(o.KeyFile)
+	} else if o.IdentityFile != "" {
+		identity.KeyPath = utils.ToAbsolutePath(o.IdentityFile)
 		identity.AuthType = "key"
 		identityUpdated = true
 	}
-	if o.KeyPass != "" {
-		identity.Passphrase = o.KeyPass
+	if o.Passphrase != "" {
+		identity.Passphrase = o.Passphrase
 		identityUpdated = true
 	}
 	return identityUpdated
@@ -332,14 +336,14 @@ func (o *SshOptions) createNewNode(provider config.ConfigProvider) (string, erro
 	identity := models.Identity{
 		User: strings.TrimSpace(o.User),
 	}
-	if o.Password == "" && o.KeyFile == "" {
+	if o.Password == "" && o.IdentityFile == "" {
 		identity.AuthType = "auto"
 	} else if o.Password != "" {
 		identity.Password = o.Password
 		identity.AuthType = "password"
-	} else if o.KeyFile != "" {
-		identity.KeyPath = utils.ToAbsolutePath(o.KeyFile)
-		identity.Passphrase = o.KeyPass
+	} else if o.IdentityFile != "" {
+		identity.KeyPath = utils.ToAbsolutePath(o.IdentityFile)
+		identity.Passphrase = o.Passphrase
 		identity.AuthType = "key"
 	}
 	provider.AddHost(node.HostRef, hostObj)
@@ -349,7 +353,7 @@ func (o *SshOptions) createNewNode(provider config.ConfigProvider) (string, erro
 }
 
 func update(nodeID string, o *SshOptions, provider config.ConfigProvider) bool {
-	if o.Password == "" && o.KeyFile == "" && o.JumpHost == "" && !o.Sudo && o.Alias == "" && len(o.Tags) == 0 {
+	if o.Password == "" && o.IdentityFile == "" && o.JumpHost == "" && !o.Sudo && o.Alias == "" && len(o.Tags) == 0 {
 		return false
 	}
 	node, _ := provider.GetNode(nodeID)

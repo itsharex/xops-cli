@@ -45,13 +45,18 @@ func NewCmdSftp() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&o.maxTask, "task", 0, i18n.T("flag_sftp_task"))
 	cmd.Flags().IntVar(&o.maxThread, "thread", 0, i18n.T("flag_sftp_thread"))
-	cmd.Flags().StringVarP(&o.Password, "password", "P", "", i18n.T("flag_password"))
-	cmd.Flags().StringVarP(&o.KeyFile, "key", "i", "", i18n.T("flag_key"))
-	cmd.Flags().StringVarP(&o.KeyPass, "key_pass", "w", "", i18n.T("flag_key_pass"))
-	cmd.Flags().StringVarP(&o.JumpHost, "jump", "j", "", i18n.T("flag_jump"))
-	cmd.Flags().StringVarP(&o.Alias, "alias", "a", "", i18n.T("flag_alias"))
-	cmd.Flags().StringSliceVarP(&o.Tags, "tag", "t", []string{}, i18n.T("flag_tag"))
-	cmd.MarkFlagsMutuallyExclusive("password", "key")
+
+	// OpenSSH-compatible flags
+	cmd.Flags().StringVarP(&o.IdentityFile, "identity", "i", "", i18n.T("flag_identity"))
+	cmd.Flags().StringVarP(&o.JumpHost, "jump", "J", "", i18n.T("flag_jump"))
+
+	// xops-enhanced flags (long-form only, no short flags to avoid OpenSSH conflicts)
+	cmd.Flags().StringVar(&o.Password, "password", "", i18n.T("flag_password"))
+	cmd.Flags().StringVar(&o.Passphrase, "passphrase", "", i18n.T("flag_passphrase"))
+	cmd.Flags().StringVar(&o.Alias, "alias", "", i18n.T("flag_alias"))
+	cmd.Flags().StringSliceVar(&o.Tags, "tag", []string{}, i18n.T("flag_tag"))
+
+	cmd.MarkFlagsMutuallyExclusive("password", "identity")
 	return cmd
 }
 
@@ -145,14 +150,14 @@ func (o *SftpOptions) createNewNode(provider config.ConfigProvider) (string, err
 	identity := models.Identity{
 		User: strings.TrimSpace(o.User),
 	}
-	if o.Password == "" && o.KeyFile == "" {
+	if o.Password == "" && o.IdentityFile == "" {
 		identity.AuthType = "auto"
 	} else if o.Password != "" {
 		identity.Password = o.Password
 		identity.AuthType = "password"
-	} else if o.KeyFile != "" {
-		identity.KeyPath = utils.ToAbsolutePath(o.KeyFile)
-		identity.Passphrase = o.KeyPass
+	} else if o.IdentityFile != "" {
+		identity.KeyPath = utils.ToAbsolutePath(o.IdentityFile)
+		identity.Passphrase = o.Passphrase
 		identity.AuthType = "key"
 	}
 	provider.AddHost(node.HostRef, hostObj)

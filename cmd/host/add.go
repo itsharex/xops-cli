@@ -67,7 +67,7 @@ func NewCmdInventoryAdd() *cobra.Command {
 					}
 					identity.Password, identity.AuthType = pass, "password"
 				}
-				identityRef = fmt.Sprintf("id-%s@%s:%d", identity.User, address, port)
+				identityRef = fmt.Sprintf("%s@%s", identity.User, address)
 			}
 
 			name := fmt.Sprintf("%s@%s:%d", identity.User, address, port)
@@ -84,7 +84,7 @@ func NewCmdInventoryAdd() *cobra.Command {
 
 			hostObj := models.Host{Address: address, Port: port}
 			node := models.Node{
-				HostRef:     fmt.Sprintf("host-%s:%d", address, port),
+				HostRef:     fmt.Sprintf("%s:%d", address, port),
 				IdentityRef: identityRef,
 				Alias:       alias,
 				Tags:        tags,

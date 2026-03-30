@@ -32,12 +32,22 @@ func (cp Provider) add(nodeID string) {
 	if !ok {
 		return
 	}
-	identity, ok := cp.GetIdentity(nodeID)
-	if !ok {
-		return
+
+	// 1. nodeID 映射 - 即使后续 Host/Identity 缺失，也要确保 nodeID 自身可查
+	cp.lookupIndex.Set(nodeID, nodeID)
+
+	// 2. 节点别名映射 - 仅依赖 node 本身
+	for _, a := range node.Alias {
+		if a != "" {
+			cp.lookupIndex.Set(a, nodeID)
+		}
 	}
-	host, ok := cp.GetHost(nodeID)
-	if !ok {
+
+	identity, idOk := cp.GetIdentity(nodeID)
+	host, hostOk := cp.GetHost(nodeID)
+
+	// 如果缺少 Host 或 Identity，部分高级映射（如 IP 映射、User@Address 映射）无法建立
+	if !idOk || !hostOk {
 		return
 	}
 
@@ -45,31 +55,26 @@ func (cp Provider) add(nodeID string) {
 	port := host.Port
 	user := identity.User
 
-	// 1. nodeID 映射
-	cp.lookupIndex.Set(nodeID, nodeID)
-
-	// 2. IP/地址 映射
+	// 3. IP/地址 映射
 	cp.lookupIndex.Set(address, nodeID)
 
-	// 3. User@Address 映射
+	// 4. User@Address 映射
 	if user != "" {
 		cp.lookupIndex.Set(fmt.Sprintf("%s@%s", user, address), nodeID)
 		cp.lookupIndex.Set(fmt.Sprintf("%s@%s:%d", user, address, port), nodeID)
 	}
 
-	// 4. 节点别名映射
-	for _, a := range node.Alias {
-		if a == "" {
-			continue
-		}
-		cp.lookupIndex.Set(a, nodeID)
-		if user != "" {
-			cp.lookupIndex.Set(fmt.Sprintf("%s@%s", user, a), nodeID)
-			cp.lookupIndex.Set(fmt.Sprintf("%s@%s:%d", user, a, port), nodeID)
+	// 5. 补充节点别名的高级映射（User@Alias 等）
+	if user != "" {
+		for _, a := range node.Alias {
+			if a != "" {
+				cp.lookupIndex.Set(fmt.Sprintf("%s@%s", user, a), nodeID)
+				cp.lookupIndex.Set(fmt.Sprintf("%s@%s:%d", user, a, port), nodeID)
+			}
 		}
 	}
 
-	// 5. 主机别名映射
+	// 6. 主机别名映射
 	for _, a := range host.Alias {
 		if a == "" {
 			continue

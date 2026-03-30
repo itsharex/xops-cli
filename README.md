@@ -54,14 +54,27 @@ xops host tags
 ### 2. SSH 连接
 
 ```bash
-# 通过名称直接连接（会自动保存连接信息）
+# 通过名称/别名直接连接（会自动保存连接信息）
 xops ssh web-01
 
-# 连接的同时指定分组
-xops ssh root@192.168.1.11 -t db
+# OpenSSH 兼容风格连接
+xops ssh -l root -p 22 192.168.1.11
+xops ssh root@192.168.1.11
 
-# 建立本地端口转发隧道并将进程挂起 (-L 本地端口:目标IP:目标端口, -N 不执行远程命令)
-xops ssh web-01 -L 8080:localhost:80 -N
+# 通过跳板机连接（-J 兼容 OpenSSH）
+xops ssh -J jumphost root@192.168.1.12
+
+# 使用私钥认证（-i 兼容 OpenSSH）
+xops ssh -i ~/.ssh/id_rsa root@192.168.1.13
+
+# 建立本地端口转发隧道并挂起 (-L/-N 兼容 OpenSSH)
+xops ssh -L 8080:localhost:80 -N web-01
+
+# xops 增强功能：连接时指定分组标签
+xops ssh --tag db root@192.168.1.11
+
+# xops 增强功能：以 sudo 模式连接
+xops ssh --sudo web-01
 ```
 
 ### 3. 批量命令执行

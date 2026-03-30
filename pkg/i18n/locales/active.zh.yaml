@@ -34,7 +34,7 @@ build_time_label:
 ssh_short:
   other: "通过SSH连接到指定主机"
 ssh_long:
-  other: "通过SSH连接到指定主机并提供交互式终端。\n用法示例:\nxops ssh user@host[:port]\nxops ssh user host [port]\nxops -h host -u user\n用户和主机为必选参数,端口默认为22,一般不需要修改\n通过flags提供主机和用户信息时会忽略参数提供的信息\n如果未通过-p选项显式提供密码,将会从终端输入或通过保存的密码文件读取密码\n成功登录过的用户和主机组合的密码将会保存到密码文件中\n密码采用对称加密算法加密保存,密码文件位置为~/.xops_passwords.json"
+  other: "通过SSH连接到指定主机并提供交互式终端。\n\n用法示例（兼容 OpenSSH 风格）:\n  xops ssh user@host[:port]\n  xops ssh -l user -p 22 -i ~/.ssh/id_rsa hostname\n  xops ssh -J jumphost hostname\n  xops ssh -L 8080:localhost:80 -N hostname\n\nxops 增强选项:\n  xops ssh --host web-01                # 按别名/名称连接\n  xops ssh --sudo hostname              # 以 sudo 模式连接\n  xops ssh --alias myserver hostname    # 保存连接别名\n  xops ssh --tag web hostname           # 为节点添加标签\n\n用户和主机为必选参数,端口默认为22。\n通过flags提供主机和用户信息时会忽略参数提供的信息。\n如果未通过--password选项显式提供密码,将会从终端输入或通过保存的密码文件读取密码。\n成功登录过的用户和主机组合的密码将会保存到密码文件中。\n密码采用对称加密算法加密保存,密码文件位置为~/.xops_passwords.json"
 flag_host:
   other: "目标主机/连接别名"
 flag_hosts:
@@ -57,6 +57,12 @@ flag_alias:
   other: "连接别名"
 flag_tag:
   other: "为节点添加标签(分组)"
+flag_login:
+  other: "SSH 登录用户名"
+flag_identity:
+  other: "SSH 身份(私钥)文件路径"
+flag_passphrase:
+  other: "SSH 私钥密码短语"
 flag_local_forward:
   other: "本地端口转发 [bind_address:]port:host:hostport"
 flag_remote_forward:
@@ -74,7 +80,7 @@ prompt_enter_user_password:
 scp_short:
   other: "在本地和远程主机之间传输文件"
 scp_long:
-  other: "在本地和远程主机之间传输文件，支持多台主机并行传输。\n支持以下场景:\n1. 从本地上传到远程: xops scp local_path user@host:remote_path\n2. 从远程下载到本地: xops scp user@host:remote_path local_path\n3. 远程到远程传输: xops scp user1@host1:path1 user2@host2:path2\n4. 批量上传到多台主机: xops scp local_path --dest remote_path -H host1,host2\n5. 按分组传输: xops scp local_path --dest remote_path -t web\n\n通过flags提供主机和用户信息时会覆盖参数提供的信息。\n如果未通过-w选项显式提供密码, 将会从终端输入或通过保存的配置文件读取。\n使用 --tag 时会忽略其他主机指定方式。"
+  other: "在本地和远程主机之间传输文件，支持多台主机并行传输。\n\n用法示例（兼容 OpenSSH 风格）:\n  xops scp -i ~/.ssh/id_rsa local_path user@host:remote_path\n  xops scp local_path user@host:remote_path\n  xops scp user@host:remote_path local_path\n  xops scp user1@host1:path1 user2@host2:path2\n\n批量传输 (xops 增强):\n  xops scp local_path --dest remote_path --host host1,host2\n  xops scp local_path --dest remote_path --tag web\n\n通过flags提供主机和用户信息时会覆盖参数提供的信息。\n如果未通过--password选项显式提供密码，将会从终端输入或通过保存的配置文件读取。\n使用 --tag 时会忽略其他主机指定方式。"
 flag_scp_src:
   other: "源路径 (批量模式使用)"
 flag_scp_dest:
@@ -106,7 +112,7 @@ scp_save_config_failed:
 sftp_short:
   other: "通过sftp连接到指定主机"
 sftp_long:
-  other: "通过sftp连接到指定主机并提供交互式终端。\n用法示例:\nxops sftp user@host[:port] [-P password] [--task maxTask] [--thread maxThread]\n用户和主机为必选参数,端口默认为22,一般不需要修改\n通过flags提供主机和用户信息时会忽略参数提供的信息\n如果未通过-p选项显式提供密码,将会从终端输入或通过保存的密码文件读取密码\n成功登录过的用户和主机组合的密码将会保存到密码文件中\n密码采用对称加密算法加密保存,密码文件位置为~/.xops_passwords.json"
+  other: "通过sftp连接到指定主机并提供交互式终端。\n\n用法示例（兼容 OpenSSH 风格）:\n  xops sftp user@host[:port]\n  xops sftp -i ~/.ssh/id_rsa user@host\n  xops sftp -J jumphost user@host\n\n用户和主机为必选参数,端口默认为22。\n如果未通过--password选项显式提供密码,将会从终端输入或通过保存的密码文件读取密码。"
 flag_sftp_task:
   other: "同时下载文件数"
 flag_sftp_thread:
@@ -116,7 +122,7 @@ flag_sftp_thread:
 exec_short:
   other: "对一个或多个远程主机执行命令"
 exec_long:
-  other: "对一个或多个远程主机执行命令。支持批量执行和提权。\n用法示例:\nxops exec -H host1,host2 -c \"uptime\"\nxops exec -t web -c \"uptime\"\nxops exec -I hosts.txt --shell script.sh\nxops exec user@host \"df -h\"\n\n通过flags提供主机和用户信息时会覆盖参数提供的信息。\n使用 --tag 时会忽略其他主机指定方式。"
+  other: "对一个或多个远程主机执行命令。支持批量执行和提权。\n\n用法示例（兼容 OpenSSH 风格）:\n  xops exec -l root -p 22 192.168.1.11 \"uptime\"\n  xops exec -i ~/.ssh/id_rsa -J jumphost 192.168.1.11 \"df -h\"\n  xops exec root@192.168.1.11 \"uptime\"\n\n批量执行:\n  xops exec --host host1,host2 -c \"uptime\"\n  xops exec --tag web -c \"uptime\"\n  xops exec -I hosts.txt --shell script.sh\n\n通过flags提供主机和用户信息时会覆盖参数提供的信息。\n使用 --tag 时会忽略其他主机指定方式。"
 flag_exec_sudo:
   other: "使用sudo执行"
 flag_exec_su_pwd:
@@ -647,6 +653,10 @@ identity_err_exists:
 # ---- alias errors ----
 alias_err_exists:
   other: "别名 {{.Alias}} 已被节点 {{.Node}} 使用"
+alias_err_duplicate_input:
+  other: "输入中存在重复的别名: {{.Alias}}"
+tag_err_duplicate_input:
+  other: "输入中存在重复的标签: {{.Tag}}"
 
 # ---- firewall additions ----
 fw_err_os_not_supported:

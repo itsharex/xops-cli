@@ -49,26 +49,29 @@ func NewCmdExec() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&o.Host, "host", "H", "", i18n.T("flag_hosts"))
+	// OpenSSH-compatible flags
 	cmd.Flags().Uint16VarP(&o.Port, "port", "p", 0, i18n.T("flag_port"))
-	cmd.Flags().StringVarP(&o.User, "user", "u", "", i18n.T("flag_user"))
-	cmd.Flags().StringVarP(&o.Password, "password", "P", "", i18n.T("flag_password"))
-	cmd.Flags().StringVarP(&o.KeyFile, "key", "i", "", i18n.T("flag_key"))
-	cmd.Flags().StringVarP(&o.KeyPass, "key_pass", "w", "", i18n.T("flag_key_pass"))
-	cmd.Flags().StringVarP(&o.JumpHost, "jump", "j", "", i18n.T("flag_jump"))
-	cmd.Flags().StringVarP(&o.Alias, "alias", "a", "", i18n.T("flag_alias"))
+	cmd.Flags().StringVarP(&o.User, "login", "l", "", i18n.T("flag_login"))
+	cmd.Flags().StringVarP(&o.IdentityFile, "identity", "i", "", i18n.T("flag_identity"))
+	cmd.Flags().StringVarP(&o.JumpHost, "jump", "J", "", i18n.T("flag_jump"))
 
-	cmd.Flags().BoolVarP(&o.Sudo, "sudo", "s", false, i18n.T("flag_exec_sudo"))
+	// xops-enhanced flags (long-form only, no short flags to avoid OpenSSH conflicts)
+	cmd.Flags().StringVar(&o.Host, "host", "", i18n.T("flag_hosts"))
+	cmd.Flags().StringVar(&o.Password, "password", "", i18n.T("flag_password"))
+	cmd.Flags().StringVar(&o.Passphrase, "passphrase", "", i18n.T("flag_passphrase"))
+	cmd.Flags().StringVar(&o.Alias, "alias", "", i18n.T("flag_alias"))
+	cmd.Flags().BoolVar(&o.Sudo, "sudo", false, i18n.T("flag_exec_sudo"))
 	cmd.Flags().StringVar(&o.SuPwd, "suPwd", "", i18n.T("flag_exec_su_pwd"))
 
+	// exec-specific flags
 	cmd.Flags().StringVarP(&o.Command, "cmd", "c", "", i18n.T("flag_exec_cmd"))
 	cmd.Flags().StringVarP(&o.HostFile, "ifile", "I", "", i18n.T("flag_exec_ifile"))
-	cmd.Flags().StringVarP(&o.Tag, "tag", "t", "", i18n.T("flag_exec_tag"))
+	cmd.Flags().StringVar(&o.Tag, "tag", "", i18n.T("flag_exec_tag"))
 	cmd.Flags().StringVar(&o.ShellFile, "shell", "", i18n.T("flag_exec_shell"))
 	cmd.Flags().IntVar(&o.TaskCount, "task", 3, i18n.T("flag_exec_task"))
 	cmd.Flags().BoolVarP(&o.Interactive, "interactive", "x", false, i18n.T("flag_exec_interactive"))
 
-	cmd.MarkFlagsMutuallyExclusive("password", "key")
+	cmd.MarkFlagsMutuallyExclusive("password", "identity")
 	cmd.MarkFlagsMutuallyExclusive("host", "ifile", "tag")
 	cmd.MarkFlagsMutuallyExclusive("cmd", "shell")
 
@@ -436,11 +439,11 @@ func (o *ExecOptions) buildIdentity(addr utils.HostInfo) models.Identity {
 
 	keyPath := addr.KeyPath
 	if keyPath == "" {
-		keyPath = o.KeyFile
+		keyPath = o.IdentityFile
 	}
 	keyPass := addr.Passphrase
 	if keyPass == "" {
-		keyPass = o.KeyPass
+		keyPass = o.Passphrase
 	}
 
 	if password == "" && keyPath == "" {

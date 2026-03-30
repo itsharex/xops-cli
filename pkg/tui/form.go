@@ -30,40 +30,7 @@ type nodeFormState struct {
 }
 
 func (m *Model) initForm(nodeID string) Model {
-	state := &nodeFormState{
-		port:     "22",
-		authType: "password",
-		sudoMode: string(models.SudoModeAuto),
-	}
-
-	if nodeID != "" {
-		state.isEdit = true
-		state.originalID = nodeID
-		node, _ := m.provider.GetNode(nodeID)
-		host, _ := m.provider.GetHost(nodeID)
-		identity, _ := m.provider.GetIdentity(nodeID)
-
-		if len(node.Alias) > 0 {
-			state.alias = strings.Join(node.Alias, ",")
-		}
-		state.user = identity.User
-		state.address = host.Address
-		state.port = strconv.Itoa(int(host.Port))
-		if identity.AuthType != "" {
-			state.authType = identity.AuthType
-		} else if identity.KeyPath != "" {
-			state.authType = "key"
-		}
-		state.password = identity.Password
-		state.keyPath = identity.KeyPath
-		state.passphrase = identity.Passphrase
-		state.sudoMode = string(node.SudoMode)
-		if state.sudoMode == "" {
-			state.sudoMode = string(models.SudoModeAuto)
-		}
-		state.tags = strings.Join(node.Tags, ",")
-	}
-
+	state := m.newNodeFormState(nodeID)
 	m.formState = state
 
 	m.form = huh.NewForm(
@@ -72,26 +39,7 @@ func (m *Model) initForm(nodeID string) Model {
 			huh.NewInput().
 				Title(i18n.T("tui_form_alias")).
 				Value(&state.alias).
-				Validate(func(s string) error {
-					if s == "" {
-						return nil
-					}
-					// Check for duplicate aliases (comma-separated)
-					for _, a := range strings.Split(s, ",") {
-						a = strings.TrimSpace(a)
-						if a == "" {
-							continue
-						}
-						if existingNode := m.provider.FindAlias(a); existingNode != "" {
-							// 如果是编辑模式且别名属于当前节点，则跳过
-							if state.isEdit && existingNode == state.originalID {
-								continue
-							}
-							return errors.New(i18n.Tf("alias_err_exists", map[string]any{"Alias": a, "Node": existingNode}))
-						}
-					}
-					return nil
-				}),
+				Validate(m.validateAliases),
 			huh.NewInput().
 				Title(i18n.T("tui_form_user")).
 				Value(&state.user).
@@ -152,11 +100,94 @@ func (m *Model) initForm(nodeID string) Model {
 				Value(&state.sudoMode),
 			huh.NewInput().
 				Title(i18n.T("tui_form_tags")).
-				Value(&state.tags),
+				Value(&state.tags).
+				Validate(m.validateTags),
 		),
 	).WithTheme(huh.ThemeCharm()).WithWidth(m.lastSize.Width).WithHeight(m.lastSize.Height - 1)
 	m.form.Init()
 	return *m
+}
+
+func (m *Model) newNodeFormState(nodeID string) *nodeFormState {
+	state := &nodeFormState{
+		port:     "22",
+		authType: "password",
+		sudoMode: string(models.SudoModeAuto),
+	}
+
+	if nodeID == "" {
+		return state
+	}
+
+	state.isEdit = true
+	state.originalID = nodeID
+	node, _ := m.provider.GetNode(nodeID)
+	host, _ := m.provider.GetHost(nodeID)
+	identity, _ := m.provider.GetIdentity(nodeID)
+
+	if len(node.Alias) > 0 {
+		state.alias = strings.Join(node.Alias, ",")
+	}
+	state.user = identity.User
+	state.address = host.Address
+	state.port = strconv.Itoa(int(host.Port))
+	if identity.AuthType != "" {
+		state.authType = identity.AuthType
+	} else if identity.KeyPath != "" {
+		state.authType = "key"
+	}
+	state.password = identity.Password
+	state.keyPath = identity.KeyPath
+	state.passphrase = identity.Passphrase
+	state.sudoMode = string(node.SudoMode)
+	if state.sudoMode == "" {
+		state.sudoMode = string(models.SudoModeAuto)
+	}
+	state.tags = strings.Join(node.Tags, ",")
+	return state
+}
+
+func (m *Model) validateAliases(s string) error {
+	if s == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, a := range strings.Split(s, ",") {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if seen[a] {
+			return errors.New(i18n.Tf("alias_err_duplicate_input", map[string]any{"Alias": a}))
+		}
+		seen[a] = true
+
+		if existingNode := m.provider.FindAlias(a); existingNode != "" {
+			if m.formState.isEdit && existingNode == m.formState.originalID {
+				continue
+			}
+			return errors.New(i18n.Tf("alias_err_exists", map[string]any{"Alias": a, "Node": existingNode}))
+		}
+	}
+	return nil
+}
+
+func (m *Model) validateTags(s string) error {
+	if s == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	for _, t := range strings.Split(s, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if seen[t] {
+			return errors.New(i18n.Tf("tag_err_duplicate_input", map[string]any{"Tag": t}))
+		}
+		seen[t] = true
+	}
+	return nil
 }
 
 func (m *Model) updateForm(msg tea.Msg) (Model, tea.Cmd) {
@@ -196,68 +227,58 @@ func (m *Model) saveForm() {
 
 	port, _ := strconv.Atoi(s.port)
 
+	// Prepare IDs
+	identityID := fmt.Sprintf("%s@%s", s.user, s.address)
+	hostID := fmt.Sprintf("%s:%d", s.address, port)
+	nodeID := fmt.Sprintf("%s@%s:%d", s.user, s.address, port)
+
 	// Standardize key path
 	absKeyPath := ""
 	if s.authType == "key" && s.keyPath != "" {
 		absKeyPath = utils.ToAbsolutePath(s.keyPath)
 	}
 
-	// Save Identity
-	identityID := fmt.Sprintf("%s@%s", s.user, s.address)
-	identity := models.Identity{
-		User:       s.user,
-		AuthType:   s.authType,
-		Password:   s.password,
-		KeyPath:    absKeyPath,
-		Passphrase: s.passphrase,
-	}
+	// 1. Save Identity
+	// Try to get existing identity to preserve any extra fields
+	identity, _ := m.provider.GetConfig().Identities.Get(identityID)
+	identity.User = s.user
+	identity.AuthType = s.authType
 	if s.authType == "password" {
+		identity.Password = s.password
 		identity.KeyPath = ""
 		identity.Passphrase = ""
 	} else {
+		identity.KeyPath = absKeyPath
+		identity.Passphrase = s.passphrase
 		identity.Password = ""
 	}
 	m.provider.AddIdentity(identityID, identity)
 
-	// Save Host
-	hostID := fmt.Sprintf("%s:%d", s.address, port)
-	host := models.Host{
-		Address: s.address,
-		Port:    uint16(port),
-	}
+	// 2. Save Host
+	// Try to get existing host to preserve any extra fields (like Host.Alias)
+	host, _ := m.provider.GetConfig().Hosts.Get(hostID)
+	host.Address = s.address
+	host.Port = uint16(port)
 	m.provider.AddHost(hostID, host)
 
-	// Save Node
-	var alias []string
-	if strings.TrimSpace(s.alias) != "" {
-		for _, a := range strings.Split(s.alias, ",") {
-			sa := strings.TrimSpace(a)
-			if sa != "" {
-				alias = append(alias, sa)
-			}
-		}
+	// 3. Save Node
+	var node models.Node
+	if s.isEdit {
+		// Load existing node from original ID to preserve ProxyJump, SuPwd, etc.
+		node, _ = m.provider.GetNode(s.originalID)
+	} else {
+		// If not edit, check if nodeID already exists to avoid blind overwrite
+		node, _ = m.provider.GetNode(nodeID)
 	}
 
-	var tags []string
-	if strings.TrimSpace(s.tags) != "" {
-		for _, t := range strings.Split(s.tags, ",") {
-			st := strings.TrimSpace(t)
-			if st != "" {
-				tags = append(tags, st)
-			}
-		}
-	}
+	// Update fields from form
+	node.HostRef = hostID
+	node.IdentityRef = identityID
+	node.SudoMode = models.SudoMode(s.sudoMode)
+	node.Alias = splitComma(s.alias)
+	node.Tags = splitComma(s.tags)
 
-	nodeID := fmt.Sprintf("%s@%s:%d", s.user, s.address, port)
-	node := models.Node{
-		HostRef:     hostID,
-		IdentityRef: identityID,
-		SudoMode:    models.SudoMode(s.sudoMode),
-		Tags:        tags,
-		Alias:       alias,
-	}
-
-	// Delete old node if ID changed or just updating
+	// Delete old node if ID changed
 	if s.isEdit && s.originalID != nodeID {
 		m.provider.DeleteNode(s.originalID)
 	}
@@ -269,6 +290,21 @@ func (m *Model) saveForm() {
 	} else {
 		m.status = successStyle.Render(i18n.Tf("tui_status_saved", map[string]any{"ID": nodeID}))
 	}
+}
+
+// splitComma parses a comma-separated string into a slice of trimmed strings
+func splitComma(s string) []string {
+	var res []string
+	if strings.TrimSpace(s) == "" {
+		return res
+	}
+	for _, part := range strings.Split(s, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			res = append(res, trimmed)
+		}
+	}
+	return res
 }
 
 // getAllTags 获取所有现有标签
