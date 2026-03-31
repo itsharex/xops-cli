@@ -4,10 +4,9 @@ import (
 	"fmt"
 
 	"github.com/pkg/sftp"
-	"github.com/wentf9/xops-cli/pkg/ssh" // 引用我们要复用的 ssh 包
+	"github.com/wentf9/xops-cli/pkg/ssh"
 )
 
-// Option 定义配置函数的类型
 type Option func(*Client)
 
 func WithConcurrentFiles(con int) Option {
@@ -21,7 +20,7 @@ func WithConcurrentFiles(con int) Option {
 func WithThreadsPerFile(t int) Option {
 	return func(c *Client) {
 		if t > 0 {
-			c.config.ConcurrentFiles = t
+			c.config.ThreadsPerFile = t
 		}
 	}
 }
@@ -29,15 +28,41 @@ func WithThreadsPerFile(t int) Option {
 func WithChunkSize(size int) Option {
 	return func(c *Client) {
 		if size > 0 {
-			c.config.ConcurrentFiles = size
+			c.config.ChunkSize = int64(size)
 		}
+	}
+}
+
+func WithResume(enable bool) Option {
+	return func(c *Client) {
+		c.config.EnableResume = enable
+	}
+}
+
+func WithResumeMinSize(size int64) Option {
+	return func(c *Client) {
+		if size > 0 {
+			c.config.ResumeMinSize = size
+		}
+	}
+}
+
+func WithForce(force bool) Option {
+	return func(c *Client) {
+		c.config.Force = force
+	}
+}
+
+func WithNoOverwrite(noOverwrite bool) Option {
+	return func(c *Client) {
+		c.config.NoOverwrite = noOverwrite
 	}
 }
 
 // Client 包装了 sftp.Client，并持有底层的 ssh 连接引用
 type Client struct {
 	sftpClient *sftp.Client
-	sshClient  *ssh.Client // 保留引用，方便获取 Node 信息或关闭连接
+	sshClient  *ssh.Client
 	config     TransferConfig
 }
 
@@ -48,16 +73,14 @@ func NewClient(sshCli *ssh.Client, opts ...Option) (*Client, error) {
 		sshClient: sshCli,
 		config:    DefaultConfig(),
 	}
-	// 应用用户传入的配置
 	for _, opt := range opts {
 		opt(sftpCli)
 	}
 
-	// 使用配置初始化底层的 sftp.Client
 	client, err := sftp.NewClient(
 		sshCli.SSHClient(),
 		sftp.MaxConcurrentRequestsPerFile(sftpCli.config.ThreadsPerFile),
-		sftp.MaxPacket(32*1024), // 恢复为标准的 32KB 提高兼容性
+		sftp.MaxPacket(32*1024),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create sftp subsystem: %w", err)
@@ -71,6 +94,16 @@ func NewClient(sshCli *ssh.Client, opts ...Option) (*Client, error) {
 // 允许调用者执行 rename, chmod, stat, symlink 等高级操作。
 func (c *Client) SFTPClient() *sftp.Client {
 	return c.sftpClient
+}
+
+// Config 返回当前传输配置
+func (c *Client) Config() TransferConfig {
+	return c.config
+}
+
+// SetForce 动态设置强制覆盖标志
+func (c *Client) SetForce(force bool) {
+	c.config.Force = force
 }
 
 // Close 关闭 SFTP 会话 (注意：这不会关闭底层的 SSH 连接，除非你希望这样)

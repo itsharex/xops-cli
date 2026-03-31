@@ -19,8 +19,10 @@ import (
 
 type SftpOptions struct {
 	SshOptions
-	maxTask   int
-	maxThread int
+	maxTask     int
+	maxThread   int
+	force       bool
+	noOverwrite bool
 }
 
 func NewSftpOptions() *SftpOptions {
@@ -45,6 +47,8 @@ func NewCmdSftp() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&o.maxTask, "task", 0, i18n.T("flag_sftp_task"))
 	cmd.Flags().IntVar(&o.maxThread, "thread", 0, i18n.T("flag_sftp_thread"))
+	cmd.Flags().BoolVarP(&o.force, "force", "f", false, i18n.T("flag_force"))
+	cmd.Flags().BoolVarP(&o.noOverwrite, "no-clobber", "n", false, i18n.T("flag_no_overwrite"))
 
 	// OpenSSH-compatible flags
 	cmd.Flags().StringVarP(&o.IdentityFile, "identity", "i", "", i18n.T("flag_identity"))
@@ -57,6 +61,7 @@ func NewCmdSftp() *cobra.Command {
 	cmd.Flags().StringSliceVar(&o.Tags, "tag", []string{}, i18n.T("flag_tag"))
 
 	cmd.MarkFlagsMutuallyExclusive("password", "identity")
+	cmd.MarkFlagsMutuallyExclusive("force", "no-clobber")
 	return cmd
 }
 
@@ -97,6 +102,8 @@ func (o *SftpOptions) Run() error {
 		client,
 		sftp.WithConcurrentFiles(o.maxTask),
 		sftp.WithThreadsPerFile(o.maxThread),
+		sftp.WithForce(o.force),
+		sftp.WithNoOverwrite(o.noOverwrite),
 	)
 	if err != nil {
 		return fmt.Errorf("%s: %w", i18n.T("err_connect_failed"), err)

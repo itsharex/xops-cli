@@ -115,6 +115,18 @@ func GetPasswordFilePath() string {
 	return filepath.Join(user.HomeDir, ".xops", PasswordFileName)
 }
 
+// AskConfirmation 弹出提示，获取用户确认
+func AskConfirmation(prompt string) bool {
+	fmt.Printf("%s [y/N]: ", prompt)
+	var response string
+	_, err := fmt.Scanln(&response)
+	if err != nil {
+		return false
+	}
+	response = strings.ToLower(strings.TrimSpace(response))
+	return response == "y" || response == "yes"
+}
+
 // ReadPasswordFromTerminal 从终端安全地读取密码
 func ReadPasswordFromTerminal(prompt string) (string, error) {
 	fmt.Print(prompt)

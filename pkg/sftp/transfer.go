@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -60,59 +61,96 @@ func (c *Client) UploadFile(ctx context.Context, localPath, remotePath string, s
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := c.sftpClient.Create(remotePath)
+	srcStat, err := srcFile.Stat()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dstFile.Close() }()
 
-	_ = c.sftpClient.Chmod(remotePath, mode)
+	// 只有在非强制模式下才检查跳过
+	if !c.config.Force && c.shouldSkipUpload(remotePath, srcStat, progress) {
+		return nil
+	}
 
-	// 如果文件极小或并发设为1，走简单流式传输
-	if size < c.config.ChunkSize || c.config.ThreadsPerFile <= 1 {
-		_, err = io.Copy(dstFile, srcFile)
+	tempPath := remotePath + c.config.TempSuffix
+	startOffset, dstFile, err := c.prepareUploadFile(tempPath, size)
+	if err != nil {
 		return err
 	}
 
-	// 显式并发分块上传
-	g, _ := errgroup.WithContext(ctx)
-	chunkSize := c.config.ChunkSize
-	// 使用信号量限制并发数
-	sem := make(chan struct{}, c.config.ThreadsPerFile)
+	if dstFile != nil {
+		defer func() { _ = dstFile.Close() }()
+		_ = c.sftpClient.Chmod(tempPath, mode)
 
-	for offset := int64(0); offset < size; offset += chunkSize {
-		currOffset := offset
-		currSize := chunkSize
-		if currOffset+currSize > size {
-			currSize = size - currOffset
+		if progress != nil && startOffset > 0 {
+			progress(startOffset)
 		}
 
-		sem <- struct{}{}
-		g.Go(func() error {
-			defer func() { <-sem }()
-
-			buf := make([]byte, currSize)
-			n, err := srcFile.ReadAt(buf, currOffset)
-			if err != nil && !errors.Is(err, io.EOF) {
-				return err
-			}
-			if n <= 0 {
-				return nil
-			}
-
-			_, err = dstFile.WriteAt(buf[:n], currOffset)
-			if err != nil {
-				return err
-			}
-
-			if progress != nil {
-				progress(n)
-			}
-			return nil
-		})
+		if err := c.doUpload(ctx, srcFile, dstFile, startOffset, size, progress); err != nil {
+			return err
+		}
+		_ = dstFile.Close()
 	}
 
-	return g.Wait()
+	_ = c.sftpClient.Chtimes(tempPath, srcStat.ModTime(), srcStat.ModTime())
+	_, _ = c.sftpClient.Stat(remotePath)
+	_ = c.sftpClient.Remove(remotePath)
+	return c.sftpClient.Rename(tempPath, remotePath)
+}
+
+func (c *Client) shouldSkipUpload(remotePath string, srcStat os.FileInfo, progress ProgressCallback) bool {
+	if rStat, err := c.sftpClient.Stat(remotePath); err == nil {
+		if rStat.Size() == srcStat.Size() && rStat.ModTime().Unix() == srcStat.ModTime().Unix() {
+			if progress != nil {
+				progress(srcStat.Size())
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) prepareUploadFile(tempPath string, size int64) (int64, *sftp.File, error) {
+	var startOffset int64
+	var dstFile *sftp.File
+	var err error
+
+	if c.config.EnableResume {
+		if tStat, err := c.sftpClient.Stat(tempPath); err == nil {
+			if tStat.Size() < size {
+				startOffset = tStat.Size()
+				dstFile, err = c.sftpClient.OpenFile(tempPath, os.O_RDWR)
+				if err != nil {
+					return 0, nil, err
+				}
+			} else if tStat.Size() == size {
+				startOffset = size
+			}
+		}
+	}
+
+	if dstFile == nil && startOffset < size {
+		dstFile, err = c.sftpClient.Create(tempPath)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+	return startOffset, dstFile, nil
+}
+
+func (c *Client) doUpload(ctx context.Context, srcFile *os.File, dstFile *sftp.File, startOffset, size int64, progress ProgressCallback) error {
+	if (size - startOffset) <= 0 {
+		return nil
+	}
+	if (size-startOffset) < c.config.ChunkSize || c.config.ThreadsPerFile <= 1 {
+		if startOffset > 0 {
+			if _, err := srcFile.Seek(startOffset, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		_, err := io.Copy(dstFile, srcFile)
+		return err
+	}
+	return c.parallelTransfer(ctx, srcFile, dstFile, startOffset, size, progress)
 }
 
 func (c *Client) DownloadFile(ctx context.Context, remotePath, localPath string, size int64, mode os.FileMode, progress ProgressCallback) error {
@@ -122,55 +160,142 @@ func (c *Client) DownloadFile(ctx context.Context, remotePath, localPath string,
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	dstFile, err := os.Create(localPath)
+	srcStat, err := srcFile.Stat()
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dstFile.Close() }()
 
-	_ = os.Chmod(localPath, mode)
+	// 只有在非强制模式下才检查跳过
+	if !c.config.Force && c.shouldSkipDownload(localPath, srcStat, progress) {
+		return nil
+	}
 
-	if size < c.config.ChunkSize || c.config.ThreadsPerFile <= 1 {
-		_, err = io.Copy(dstFile, srcFile)
+	tempPath := localPath + c.config.TempSuffix
+	startOffset, dstFile, err := c.prepareDownloadFile(tempPath, size, mode)
+	if err != nil {
 		return err
 	}
 
+	if dstFile != nil {
+		defer func() { _ = dstFile.Close() }()
+		_ = os.Chmod(tempPath, mode)
+
+		if progress != nil && startOffset > 0 {
+			progress(startOffset)
+		}
+
+		if err := c.doDownload(ctx, srcFile, dstFile, startOffset, size, progress); err != nil {
+			return err
+		}
+		_ = dstFile.Close()
+	}
+
+	_ = os.Chtimes(tempPath, srcStat.ModTime(), srcStat.ModTime())
+	return os.Rename(tempPath, localPath)
+}
+
+func (c *Client) shouldSkipDownload(localPath string, srcStat os.FileInfo, progress ProgressCallback) bool {
+	if lStat, err := os.Stat(localPath); err == nil {
+		if lStat.Size() == srcStat.Size() && lStat.ModTime().Unix() == srcStat.ModTime().Unix() {
+			if progress != nil {
+				progress(srcStat.Size())
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) prepareDownloadFile(tempPath string, size int64, mode os.FileMode) (int64, *os.File, error) {
+	var startOffset int64
+	var dstFile *os.File
+	var err error
+
+	if c.config.EnableResume {
+		if tStat, err := os.Stat(tempPath); err == nil {
+			if tStat.Size() < size {
+				startOffset = tStat.Size()
+				dstFile, err = os.OpenFile(tempPath, os.O_RDWR, mode)
+				if err != nil {
+					return 0, nil, err
+				}
+			} else if tStat.Size() == size {
+				startOffset = size
+			}
+		}
+	}
+
+	if dstFile == nil && startOffset < size {
+		dstFile, err = os.Create(tempPath)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+	return startOffset, dstFile, nil
+}
+
+func (c *Client) doDownload(ctx context.Context, srcFile *sftp.File, dstFile *os.File, startOffset, size int64, progress ProgressCallback) error {
+	if (size - startOffset) <= 0 {
+		return nil
+	}
+	if (size-startOffset) < c.config.ChunkSize || c.config.ThreadsPerFile <= 1 {
+		if startOffset > 0 {
+			if _, err := dstFile.Seek(startOffset, io.SeekStart); err != nil {
+				return err
+			}
+			if _, err := srcFile.Seek(startOffset, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		_, err := io.Copy(dstFile, srcFile)
+		return err
+	}
+	return c.parallelTransfer(ctx, srcFile, dstFile, startOffset, size, progress)
+}
+
+type readAtSeeker interface {
+	io.ReaderAt
+	io.Seeker
+}
+
+type writeAtSeeker interface {
+	io.WriterAt
+	io.Seeker
+}
+
+func (c *Client) parallelTransfer(ctx context.Context, src readAtSeeker, dst writeAtSeeker, startOffset, totalSize int64, progress ProgressCallback) error {
 	g, _ := errgroup.WithContext(ctx)
 	chunkSize := c.config.ChunkSize
 	sem := make(chan struct{}, c.config.ThreadsPerFile)
 
-	for offset := int64(0); offset < size; offset += chunkSize {
+	for offset := startOffset; offset < totalSize; offset += chunkSize {
 		currOffset := offset
 		currSize := chunkSize
-		if currOffset+currSize > size {
-			currSize = size - currOffset
+		if currOffset+currSize > totalSize {
+			currSize = totalSize - currOffset
 		}
 
 		sem <- struct{}{}
 		g.Go(func() error {
 			defer func() { <-sem }()
-
 			buf := make([]byte, currSize)
-			n, err := srcFile.ReadAt(buf, currOffset)
+			n, err := src.ReadAt(buf, currOffset)
 			if err != nil && !errors.Is(err, io.EOF) {
 				return err
 			}
 			if n <= 0 {
 				return nil
 			}
-
-			_, err = dstFile.WriteAt(buf[:n], currOffset)
+			_, err = dst.WriteAt(buf[:n], currOffset)
 			if err != nil {
 				return err
 			}
-
 			if progress != nil {
-				progress(n)
+				progress(int64(n))
 			}
 			return nil
 		})
 	}
-
 	return g.Wait()
 }
 
@@ -184,7 +309,7 @@ func (c *Client) StreamTransfer(r io.Reader, w io.Writer, progress ProgressCallb
 				return wErr
 			}
 			if progress != nil {
-				progress(n)
+				progress(int64(n))
 			}
 		}
 		if err == io.EOF {

@@ -94,19 +94,15 @@ flag_recursive:
 flag_progress:
   other: "显示传输进度"
 flag_force:
-  other: "强制覆盖远程文件"
+  other: "强制覆盖现有文件"
+flag_no_overwrite:
+  other: "不覆盖已存在的文件 (no-clobber)"
 flag_task:
   other: "并行传输的主机数"
 flag_thread:
-  other: "单个文件传输的并发线程数"
-scp_error:
-  other: "[{{.Label}}] 错误: {{.Error}}"
-scp_transfer_failed:
-  other: "[{{.Label}}] 传输失败: {{.Error}}"
-scp_done:
-  other: "[{{.Label}}] 完成"
-scp_save_config_failed:
-  other: "保存配置失败: {{.Error}}"
+  other: "单个文件的并行分块数"
+prompt_overwrite:
+  other: "文件 {{.Path}} 已存在，是否覆盖？"
 
 # ---- sftp ----
 sftp_short:
@@ -114,9 +110,20 @@ sftp_short:
 sftp_long:
   other: "通过sftp连接到指定主机并提供交互式终端。\n\n用法示例（兼容 OpenSSH 风格）:\n  xops sftp user@host[:port]\n  xops sftp -i ~/.ssh/id_rsa user@host\n  xops sftp -J jumphost user@host\n\n用户和主机为必选参数,端口默认为22。\n如果未通过--password选项显式提供密码,将会从终端输入或通过保存的密码文件读取密码。"
 flag_sftp_task:
-  other: "同时下载文件数"
+  other: "同时传输的文件数"
 flag_sftp_thread:
-  other: "单个文件同时下载线程"
+  other: "每个文件的并行分块数"
+
+scp_error:
+  other: "[{{.Label}}] 错误: {{.Error}}"
+scp_transfer_failed:
+  other: "[{{.Label}}] 传输失败: {{.Error}}"
+scp_done:
+  other: "[{{.Label}}] 完成"
+scp_skip:
+  other: "[{{.Label}}] 文件已存在，跳过"
+scp_save_config_failed:
+  other: "保存配置失败: {{.Error}}"
 
 # ---- exec ----
 exec_short:

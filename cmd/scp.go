@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	pkgsftp "github.com/pkg/sftp"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
 	cmdutils "github.com/wentf9/xops-cli/cmd/utils"
@@ -25,6 +27,7 @@ type ScpOptions struct {
 	Recursive   bool
 	Progress    bool
 	Force       bool
+	NoOverwrite bool
 	TaskCount   int
 	ThreadCount int
 	Source      string
@@ -76,15 +79,17 @@ func NewCmdScp() *cobra.Command {
 	cmd.Flags().StringVar(&o.Tag, "tag", "", i18n.T("flag_scp_tag"))
 	cmd.Flags().BoolVarP(&o.Progress, "progress", "v", false, i18n.T("flag_progress"))
 	cmd.Flags().BoolVarP(&o.Force, "force", "f", false, i18n.T("flag_force"))
+	cmd.Flags().BoolVarP(&o.NoOverwrite, "no-clobber", "n", false, i18n.T("flag_no_overwrite"))
 	cmd.Flags().IntVar(&o.TaskCount, "task", 3, i18n.T("flag_task"))
 	cmd.Flags().IntVar(&o.ThreadCount, "thread", 4, i18n.T("flag_thread"))
 
 	cmd.MarkFlagsMutuallyExclusive("password", "identity")
 	cmd.MarkFlagsMutuallyExclusive("host", "ifile", "tag")
+	cmd.MarkFlagsMutuallyExclusive("force", "no-clobber")
 	return cmd
 }
 
-func (o *ScpOptions) Complete(cmd *cobra.Command, args []string) {
+func (o *ScpOptions) Complete(_ *cobra.Command, args []string) {
 	o.args = args
 	if len(args) == 2 {
 		if o.Source == "" {
@@ -189,6 +194,26 @@ func (o *ScpOptions) runUpload(ctx context.Context, localPath string, dst PathIn
 	}
 	defer func() { _ = sftpCli.Close() }()
 
+	remotePath := dst.Path
+	remoteStat, err := sftpCli.SFTPClient().Stat(remotePath)
+	if err == nil && remoteStat.IsDir() {
+		remotePath = sftpCli.JoinPath(remotePath, filepath.Base(localPath))
+	}
+
+	// 检查是否已存在
+	if _, err := sftpCli.SFTPClient().Stat(remotePath); err == nil {
+		if o.NoOverwrite {
+			return nil
+		}
+		if !o.Force {
+			if !cmdutils.AskConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": remotePath})) {
+				return nil
+			}
+			o.Force = true // 用户确认后开启强制覆盖
+			sftpCli.SetForce(true)
+		}
+	}
+
 	var progress sftp.ProgressCallback
 	if o.Progress {
 		info, err := os.Stat(localPath)
@@ -216,10 +241,10 @@ func (o *ScpOptions) runUpload(ctx context.Context, localPath string, dst PathIn
 				BarEnd:        "]",
 			}),
 		)
-		progress = func(n int) { _ = bar.Add(n) }
+		progress = func(n int64) { _ = bar.Add64(n) }
 	}
 
-	return sftpCli.Upload(ctx, localPath, dst.Path, progress)
+	return sftpCli.Upload(ctx, localPath, remotePath, progress)
 }
 
 func (o *ScpOptions) runDownload(ctx context.Context, src PathInfo, localPath string, provider config.ConfigProvider, connector *ssh.Connector, configStore config.Store, cfg *config.Configuration) error {
@@ -233,6 +258,26 @@ func (o *ScpOptions) runDownload(ctx context.Context, src PathInfo, localPath st
 	stat, err := sftpCli.SFTPClient().Stat(src.Path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", i18n.T("scp_err_stat_remote"), err)
+	}
+
+	// 处理本地路径是目录的情况
+	localDest := localPath
+	if lStat, err := os.Stat(localPath); err == nil && lStat.IsDir() {
+		localDest = filepath.Join(localPath, stat.Name())
+	}
+
+	// 检查本地文件是否已存在
+	if _, err := os.Stat(localDest); err == nil {
+		if o.NoOverwrite {
+			return nil
+		}
+		if !o.Force {
+			if !cmdutils.AskConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": localDest})) {
+				return nil
+			}
+			o.Force = true // 用户确认后开启强制覆盖
+			sftpCli.SetForce(true)
+		}
 	}
 
 	var progress sftp.ProgressCallback
@@ -258,17 +303,11 @@ func (o *ScpOptions) runDownload(ctx context.Context, src PathInfo, localPath st
 				BarEnd:        "]",
 			}),
 		)
-		progress = func(n int) { _ = bar.Add(n) }
+		progress = func(n int64) { _ = bar.Add64(n) }
 	}
 
 	if stat.IsDir() {
 		return sftpCli.DownloadDirectory(ctx, src.Path, localPath, progress)
-	}
-
-	// 处理本地路径是目录的情况
-	localDest := localPath
-	if lStat, err := os.Stat(localPath); err == nil && lStat.IsDir() {
-		localDest = filepath.Join(localPath, stat.Name())
 	}
 
 	return sftpCli.DownloadFile(ctx, src.Path, localDest, stat.Size(), stat.Mode(), progress)
@@ -293,7 +332,7 @@ func (o *ScpOptions) runRemoteToRemote(ctx context.Context, src, dst PathInfo, p
 	}
 	defer func() { _ = srcFile.Close() }()
 
-	stat, err := srcFile.Stat()
+	srcStat, err := srcFile.Stat()
 	if err != nil {
 		return err
 	}
@@ -304,19 +343,89 @@ func (o *ScpOptions) runRemoteToRemote(ctx context.Context, src, dst PathInfo, p
 		dstPath = dstSftp.JoinPath(dstPath, filepath.Base(src.Path))
 	}
 
-	dstFile, err := dstSftp.SFTPClient().Create(dstPath)
+	// 1. 检查目标文件是否已存在且完全匹配 (用于直接跳过)
+	if !o.Force {
+		skip, err := o.shouldSkipRemoteToRemote(dstSftp, dstPath, srcStat)
+		if err != nil {
+			return err
+		}
+		if skip {
+			return nil
+		}
+	}
+
+	// 再次检查覆盖标志并询问用户 (如果 shouldSkip 没有跳过且没有 -f)
+	if err := o.confirmRemoteToRemoteOverwrite(dstSftp, dstPath); err != nil {
+		if err.Error() == "skipped" {
+			return nil
+		}
+		return err
+	}
+
+	// 2. 使用临时文件进行传输
+	tempPath := dstPath + dstSftp.Config().TempSuffix
+	startOffset, dstFile, err := o.prepareRemoteToRemoteFile(dstSftp, tempPath, srcStat.Size())
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dstFile.Close() }()
 
-	var progress sftp.ProgressCallback
-	if o.Progress {
-		bar := progressbar.DefaultBytes(stat.Size(), "Relaying "+filepath.Base(src.Path))
-		progress = func(n int) { _ = bar.Add(n) }
+	progress := o.createRemoteToRemoteProgress(srcStat.Size(), srcStat.Name(), startOffset)
+
+	if err := o.doRemoteToRemote(srcFile, dstFile, startOffset, srcStat.Size(), dstSftp, progress); err != nil {
+		return err
 	}
 
-	return dstSftp.StreamTransfer(srcFile, dstFile, progress)
+	// 3. 传输完成：同步修改时间并重命名
+	_ = dstSftp.SFTPClient().Chtimes(tempPath, srcStat.ModTime(), srcStat.ModTime())
+	_ = dstSftp.SFTPClient().Remove(dstPath)
+	return dstSftp.SFTPClient().Rename(tempPath, dstPath)
+}
+
+func (o *ScpOptions) confirmRemoteToRemoteOverwrite(dstSftp *sftp.Client, dstPath string) error {
+	if !o.Force {
+		if _, err := dstSftp.SFTPClient().Stat(dstPath); err == nil {
+			if o.NoOverwrite {
+				return fmt.Errorf("skipped") // handled by caller as nil if we change logic
+			}
+			if !cmdutils.AskConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": dstPath})) {
+				return fmt.Errorf("skipped")
+			}
+			o.Force = true
+			dstSftp.SetForce(true)
+		}
+	}
+	return nil
+}
+
+func (o *ScpOptions) createRemoteToRemoteProgress(size int64, name string, startOffset int64) sftp.ProgressCallback {
+	var progress sftp.ProgressCallback
+	if o.Progress {
+		bar := progressbar.DefaultBytes(size, "Relaying "+filepath.Base(name))
+		progress = func(n int64) { _ = bar.Add64(n) }
+		if startOffset > 0 {
+			progress(startOffset)
+		}
+	}
+	return progress
+}
+
+func (o *ScpOptions) doRemoteToRemote(srcFile *pkgsftp.File, dstFile *pkgsftp.File, startOffset, size int64, dstSftp *sftp.Client, progress sftp.ProgressCallback) error {
+	if startOffset < size {
+		if startOffset > 0 {
+			if _, err := srcFile.Seek(startOffset, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		if dstFile != nil {
+			defer func() { _ = dstFile.Close() }()
+			err := dstSftp.StreamTransfer(srcFile, dstFile, progress)
+			if err != nil {
+				return err
+			}
+			_ = dstFile.Close()
+		}
+	}
+	return nil
 }
 
 func (o *ScpOptions) runBatch(ctx context.Context, provider config.ConfigProvider, connector *ssh.Connector, configStore config.Store, cfg *config.Configuration) error {
@@ -372,12 +481,76 @@ func (o *ScpOptions) executeTransfer(ctx context.Context, label string, addr Pat
 	}
 	defer func() { _ = sftpCli.Close() }()
 
-	err = sftpCli.Upload(ctx, o.Source, o.Dest, nil)
+	remotePath := o.Dest
+	remoteStat, err := sftpCli.SFTPClient().Stat(remotePath)
+	if err == nil && remoteStat.IsDir() {
+		remotePath = sftpCli.JoinPath(remotePath, filepath.Base(o.Source))
+	}
+
+	if _, err := sftpCli.SFTPClient().Stat(remotePath); err == nil {
+		if o.NoOverwrite || !o.Force {
+			logger.PrintWarn(i18n.Tf("scp_skip", map[string]any{"Label": label}))
+			return
+		}
+	}
+
+	err = sftpCli.Upload(ctx, o.Source, remotePath, nil)
 	if err != nil {
 		logger.PrintError(i18n.Tf("scp_transfer_failed", map[string]any{"Label": label, "Error": err}))
 	} else {
 		logger.PrintSuccess(i18n.Tf("scp_done", map[string]any{"Label": label}))
 	}
+}
+
+func (o *ScpOptions) shouldSkipRemoteToRemote(dstSftp *sftp.Client, dstPath string, srcStat os.FileInfo) (bool, error) {
+	if ds, err := dstSftp.SFTPClient().Stat(dstPath); err == nil {
+		if ds.Size() == srcStat.Size() && ds.ModTime().Unix() == srcStat.ModTime().Unix() {
+			if o.Progress {
+				bar := progressbar.DefaultBytes(srcStat.Size(), "Relaying "+filepath.Base(srcStat.Name()))
+				_ = bar.Add64(srcStat.Size())
+			}
+			return true, nil
+		}
+
+		// 检查标志位和询问用户
+		if o.NoOverwrite {
+			return true, nil
+		}
+		if !o.Force {
+			if !cmdutils.AskConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": dstPath})) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (o *ScpOptions) prepareRemoteToRemoteFile(dstSftp *sftp.Client, tempPath string, srcSize int64) (int64, *pkgsftp.File, error) {
+	var startOffset int64
+	var dstFile *pkgsftp.File
+	var err error
+
+	if dstSftp.Config().EnableResume {
+		if ts, err := dstSftp.SFTPClient().Stat(tempPath); err == nil {
+			if ts.Size() < srcSize {
+				startOffset = ts.Size()
+				dstFile, err = dstSftp.SFTPClient().OpenFile(tempPath, os.O_RDWR)
+				if err != nil {
+					return 0, nil, err
+				}
+			} else if ts.Size() == srcSize {
+				startOffset = srcSize
+			}
+		}
+	}
+
+	if dstFile == nil && startOffset < srcSize {
+		dstFile, err = dstSftp.SFTPClient().Create(tempPath)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
+	return startOffset, dstFile, nil
 }
 
 func (o *ScpOptions) connectSftpForPath(ctx context.Context, p PathInfo, specificPassword string, provider config.ConfigProvider, connector *ssh.Connector, configStore config.Store, cfg *config.Configuration) (string, *sftp.Client, error) {
@@ -400,7 +573,12 @@ func (o *ScpOptions) connectSftpForPath(ctx context.Context, p PathInfo, specifi
 			logger.PrintError(i18n.Tf("save_config_failed", map[string]any{"Error": err}))
 		}
 	}
-	sftpCli, err := sftp.NewClient(client, sftp.WithThreadsPerFile(o.ThreadCount))
+	sftpCli, err := sftp.NewClient(
+		client,
+		sftp.WithThreadsPerFile(o.ThreadCount),
+		sftp.WithForce(o.Force),
+		sftp.WithNoOverwrite(o.NoOverwrite),
+	)
 	if err != nil {
 		return "", nil, err
 	}

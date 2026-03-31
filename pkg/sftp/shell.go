@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/schollz/progressbar/v3"
@@ -282,6 +283,27 @@ func (s *Shell) handleGet(ctx context.Context, args []string) {
 		local = s.resolveLocalPath(args[1])
 	}
 
+	// 检查目标文件是否已存在
+	if lStat, err := os.Stat(local); err == nil {
+		localDest := local
+		if lStat.IsDir() {
+			localDest = filepath.Join(local, filepath.Base(remote))
+		}
+		if _, err := os.Stat(localDest); err == nil {
+			if s.client.config.NoOverwrite {
+				return
+			}
+			if !s.client.config.Force {
+				if !s.askConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": localDest})) {
+					return
+				}
+				origForce := s.client.config.Force
+				s.client.SetForce(true)
+				defer s.client.SetForce(origForce)
+			}
+		}
+	}
+
 	_, _ = fmt.Fprintln(s.rl.Stdout(), i18n.Tf("sftp_shell_downloading", map[string]any{"Remote": remote, "Local": local}))
 
 	progress := s.createProgressBar(remote)
@@ -308,6 +330,25 @@ func (s *Shell) handlePut(ctx context.Context, args []string) {
 		remote = s.client.JoinPath(s.cwd, filepath.Base(local))
 	}
 
+	// 检查目标文件是否已存在
+	remoteStat, err := s.client.sftpClient.Stat(remote)
+	if err == nil && remoteStat.IsDir() {
+		remote = s.client.JoinPath(remote, filepath.Base(local))
+	}
+	if _, err := s.client.sftpClient.Stat(remote); err == nil {
+		if s.client.config.NoOverwrite {
+			return
+		}
+		if !s.client.config.Force {
+			if !s.askConfirmation(i18n.Tf("prompt_overwrite", map[string]any{"Path": remote})) {
+				return
+			}
+			origForce := s.client.config.Force
+			s.client.SetForce(true)
+			defer s.client.SetForce(origForce)
+		}
+	}
+
 	_, _ = fmt.Fprintln(s.rl.Stdout(), i18n.Tf("sftp_shell_uploading", map[string]any{"Local": local, "Remote": remote}))
 
 	// 计算本地文件大小以显示准确的进度条
@@ -319,10 +360,21 @@ func (s *Shell) handlePut(ctx context.Context, args []string) {
 		return nil
 	})
 
-	bar := progressbar.DefaultBytes(totalSize, "Uploading")
-	callback := func(n int) { _ = bar.Add(n) }
+	bar := progressbar.NewOptions64(
+		totalSize,
+		progressbar.OptionSetDescription("Uploading"),
+		progressbar.OptionSetWriter(s.rl.Stdout()), // 关键：使用 readline 的 stdout
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionOnCompletion(func() {
+			_, _ = fmt.Fprint(s.rl.Stdout(), "\n")
+		}),
+	)
+	callback := func(n int64) { _ = bar.Add64(n) }
 
-	err := s.client.Upload(ctx, local, remote, callback)
+	err = s.client.Upload(ctx, local, remote, callback)
 	if err != nil {
 		_, _ = fmt.Fprintf(s.stderr, "%s\n", i18n.Tf("sftp_shell_upload_failed", map[string]any{"Error": err}))
 	} else {
@@ -359,25 +411,49 @@ func (s *Shell) printHelp() {
 	_, _ = fmt.Fprintln(s.rl.Stdout(), i18n.T("sftp_shell_help"))
 }
 
-// 简单的进度条辅助函数 (用于 Download，因为预先不知道 Total 只能用 spinner 或者先 Stat)
+func (s *Shell) askConfirmation(prompt string) bool {
+	// 关键：在询问前显式换行并刷新，防止提示被上一次命令的输出覆盖或吞掉
+	_, _ = fmt.Fprint(s.rl.Stdout(), "\n")
+
+	// 设置一个新的临时 prompt，这样 Readline 会自动渲染它并等待输入
+	origPrompt := s.rl.Config.Prompt
+	defer s.rl.SetPrompt(origPrompt)
+
+	s.rl.SetPrompt(fmt.Sprintf("%s [y/N]: ", prompt))
+	line, err := s.rl.Readline()
+	if err != nil {
+		return false
+	}
+	response := strings.ToLower(strings.TrimSpace(line))
+	return response == "y" || response == "yes"
+}
+
 func (s *Shell) createProgressBar(remotePath string) ProgressCallback {
 	// 尝试 Stat 获取大小
 	info, err := s.client.sftpClient.Stat(remotePath)
-	if err != nil {
-		// 无法获取大小时使用无定量的 Spinner
-		bar := progressbar.Default(-1, "Downloading")
-		return func(n int) { _ = bar.Add(n) }
+	total := int64(-1)
+	description := "Downloading"
+	if err == nil {
+		if !info.IsDir() {
+			total = info.Size()
+		} else {
+			description = "Downloading (Dir)"
+		}
 	}
 
-	//如果是目录，Stat 只能拿到目录本身的大小，不是内容的。
-	//为了响应速度，这里简化处理：如果是文件显示进度，目录则显示已传输字节数
-	if info.IsDir() {
-		bar := progressbar.Default(-1, "Downloading (Dir)")
-		return func(n int) { _ = bar.Add(n) }
-	}
-
-	bar := progressbar.DefaultBytes(info.Size(), "Downloading")
-	return func(n int) { _ = bar.Add(n) }
+	bar := progressbar.NewOptions64(
+		total,
+		progressbar.OptionSetDescription(description),
+		progressbar.OptionSetWriter(s.rl.Stdout()),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionOnCompletion(func() {
+			_, _ = fmt.Fprint(s.rl.Stdout(), "\n")
+		}),
+	)
+	return func(n int64) { _ = bar.Add64(n) }
 }
 
 func formatBytes(bytes int64) string {

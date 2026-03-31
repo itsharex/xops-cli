@@ -94,17 +94,23 @@ flag_recursive:
 flag_progress:
   other: "Show transfer progress"
 flag_force:
-  other: "Force overwrite remote files"
+  other: "Force overwrite existing files"
+flag_no_overwrite:
+  other: "Do not overwrite existing files (no-clobber)"
 flag_task:
   other: "Number of parallel host transfers"
 flag_thread:
   other: "Concurrent threads per file transfer"
+prompt_overwrite:
+  other: "File {{.Path}} already exists, overwrite?"
 scp_error:
   other: "[{{.Label}}] Error: {{.Error}}"
 scp_transfer_failed:
   other: "[{{.Label}}] Transfer failed: {{.Error}}"
 scp_done:
   other: "[{{.Label}}] Done"
+scp_skip:
+  other: "[{{.Label}}] File already exists, skipping"
 scp_save_config_failed:
   other: "Failed to save config: {{.Error}}"
 
