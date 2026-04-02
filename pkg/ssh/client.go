@@ -142,9 +142,23 @@ func (c *Client) Shell(ctx context.Context) error {
 	go func() { _, _ = io.Copy(os.Stderr, stderr) }()
 
 	// 启动协程处理用户输入
-	go func() { _, _ = io.Copy(stdin, os.Stdin) }()
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stdin, os.Stdin)
+		close(done)
+	}()
 
 	err = session.Wait()
+	_ = term.Restore(fdIn, oldState)
+	// 关键：通过设置 Stdin 的 Deadline 来中断阻塞的 Read，防止返回后 stdin 被吞字节
+	_ = os.Stdin.SetReadDeadline(time.Now())
+	// 加入 50ms 超时兜底，防止在不支持 Deadline 的系统（如 Windows）上永久阻塞
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = os.Stdin.SetReadDeadline(time.Time{})
+
 	// 忽略 ExitError（交互式 shell 的正常退出，退出码可能继承自用户执行的最后一条命令）
 	if err != nil {
 		var exitErr *ssh.ExitError
@@ -201,9 +215,88 @@ func (c *Client) RunInteractive(ctx context.Context, cmd string) error {
 
 	go func() { _, _ = io.Copy(os.Stdout, stdout) }()
 	go func() { _, _ = io.Copy(os.Stderr, stderr) }()
-	go func() { _, _ = io.Copy(stdin, os.Stdin) }()
 
-	return ignoreShellExitError(session.Wait())
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stdin, os.Stdin)
+		close(done)
+	}()
+
+	err = ignoreShellExitError(session.Wait())
+	_ = term.Restore(fdIn, oldState)
+	// 关键：通过设置 Stdin 的 Deadline 来中断阻塞的 Read，防止返回后 stdin 被吞字节
+	_ = os.Stdin.SetReadDeadline(time.Now())
+	// 加入 50ms 超时兜底，防止在不支持 Deadline 的系统（如 Windows）上永久阻塞
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = os.Stdin.SetReadDeadline(time.Time{})
+
+	return err
+}
+
+// RunInteractiveCmd 在 PTY 环境下直接执行命令（通过 SSH exec 通道，不启动交互式 shell），
+// 不会产生登录信息或命令回显，适合在已有 shell 环境内调用 vim/top 等程序。
+func (c *Client) RunInteractiveCmd(ctx context.Context, cmd string) error {
+	session, err := c.sshClient.NewSession()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = session.Close() }()
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	fdIn := int(os.Stdin.Fd())
+	fdOut := int(os.Stdout.Fd())
+	width, height, err := term.GetSize(fdOut)
+	if err != nil {
+		width, height = 80, 40
+	}
+	if err := session.RequestPty("xterm-256color", height, width, modes); err != nil {
+		return fmt.Errorf("request for pty failed: %w", err)
+	}
+
+	stdin, _ := session.StdinPipe()
+	stdout, _ := session.StdoutPipe()
+	stderr, _ := session.StderrPipe()
+
+	if err := session.Start(cmd); err != nil {
+		return fmt.Errorf("start command failed: %w", err)
+	}
+
+	oldState, err := term.MakeRaw(fdIn)
+	if err != nil {
+		return fmt.Errorf("can not set term to Raw: %w", err)
+	}
+	defer func() { _ = term.Restore(fdIn, oldState) }()
+
+	startWindowResizeLoop(session, fdOut, width, height)
+
+	go func() { _, _ = io.Copy(os.Stdout, stdout) }()
+	go func() { _, _ = io.Copy(os.Stderr, stderr) }()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(stdin, os.Stdin)
+		close(done)
+	}()
+
+	err = ignoreShellExitError(session.Wait())
+	_ = term.Restore(fdIn, oldState)
+	// 关键：通过设置 Stdin 的 Deadline 来中断阻塞的 Read，防止返回后 stdin 被吞字节
+	_ = os.Stdin.SetReadDeadline(time.Now())
+	// 加入 50ms 超时兜底，防止在不支持 Deadline 的系统（如 Windows）上永久阻塞
+	select {
+	case <-done:
+	case <-time.After(50 * time.Millisecond):
+	}
+	_ = os.Stdin.SetReadDeadline(time.Time{})
+
+	return err
 }
 
 func (c *Client) maybeDetectSudoMode(ctx context.Context) {

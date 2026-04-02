@@ -21,7 +21,7 @@ func TestDispatchCommand(t *testing.T) {
 	// 我们可以在测试中使用一个空的 liner 实例或 nil。
 	// 为了安全起见，这里创建一个 liner 实例并确保关闭。
 	line := liner.NewLiner()
-	defer line.Close()
+	defer func() { _ = line.Close() }()
 
 	tempDir := t.TempDir()
 	s := &Shell{

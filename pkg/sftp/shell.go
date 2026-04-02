@@ -2,11 +2,13 @@ package sftp
 
 import (
 	"context"
-
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -49,8 +51,8 @@ func (c *Client) NewShell(stdin io.Reader, stdout, stderr io.Writer) (*Shell, er
 	if homeDir != "" {
 		historyFile = filepath.Join(homeDir, ".xops_sftp_history")
 		if f, err := os.Open(historyFile); err == nil {
-			line.ReadHistory(f)
-			f.Close()
+			_, _ = line.ReadHistory(f)
+			_ = f.Close()
 		}
 	}
 
@@ -64,7 +66,8 @@ func (c *Client) NewShell(stdin io.Reader, stdout, stderr io.Writer) (*Shell, er
 		stderr:      stderr,
 	}
 
-	// 绑定自动补全
+	// 绑定自动补全：TabPrints 模式 — 第一次 Tab 补全公共前缀，第二次 Tab 列出所有候选（bash 行为）
+	line.SetTabCompletionStyle(liner.TabPrints)
 	line.SetWordCompleter(shell.wordCompleter)
 
 	return shell, nil
@@ -76,8 +79,8 @@ func (s *Shell) Run(ctx context.Context) error {
 		// 退出时保存历史记录
 		if s.historyFile != "" {
 			if f, err := os.Create(s.historyFile); err == nil {
-				s.line.WriteHistory(f)
-				f.Close()
+				_, _ = s.line.WriteHistory(f)
+				_ = f.Close()
 			}
 		}
 		_ = s.line.Close()
@@ -87,7 +90,7 @@ func (s *Shell) Run(ctx context.Context) error {
 		prompt := fmt.Sprintf("sftp:%s> ", s.cwd)
 		input, err := s.line.Prompt(prompt)
 		if err != nil {
-			if err == liner.ErrPromptAborted {
+			if errors.Is(err, liner.ErrPromptAborted) {
 				continue // 对应 Ctrl+C 拦截
 			}
 			return nil // EOF 对应 Ctrl+D 或其他错误退出
@@ -99,6 +102,15 @@ func (s *Shell) Run(ctx context.Context) error {
 		}
 
 		s.line.AppendHistory(input) // 动态加入历史
+
+		// ! 前缀：本地执行快捷方式（如 `!ls` 或 `! ls -la`）
+		if strings.HasPrefix(input, "!") {
+			localCmd := strings.TrimSpace(input[1:])
+			if localCmd != "" {
+				s.handleLexec(ctx, localCmd)
+			}
+			continue
+		}
 
 		args := strings.Fields(input)
 		cmd := args[0]
@@ -131,10 +143,26 @@ func (s *Shell) dispatchCommand(ctx context.Context, cmd string, params []string
 		s.handleMkdirGroup(cmd, params)
 	case "rm", "lrm":
 		s.handleRmGroup(cmd, params)
+	default:
+		s.dispatchTransferCmd(ctx, cmd, params)
+	}
+	return false, nil
+}
+
+func (s *Shell) dispatchTransferCmd(ctx context.Context, cmd string, params []string) {
+	switch cmd {
 	case "cp", "lcp":
 		s.handleCpGroup(cmd, params)
 	case "mv", "lmv":
 		s.handleMvGroup(cmd, params)
+	case "shell":
+		s.handleShell(ctx)
+	case "lshell":
+		s.handleLshell(ctx)
+	case "exec":
+		s.handleExec(ctx, params)
+	case "lexec":
+		s.handleLexec(ctx, strings.Join(params, " "))
 	case "get":
 		s.handleGet(ctx, params)
 	case "put":
@@ -142,7 +170,6 @@ func (s *Shell) dispatchCommand(ctx context.Context, cmd string, params []string
 	default:
 		_, _ = fmt.Fprintf(s.stderr, "%s\n", i18n.Tf("sftp_shell_unknown_cmd", map[string]any{"Cmd": cmd}))
 	}
-	return false, nil
 }
 
 func (s *Shell) handlePwd(cmd string) {
@@ -721,6 +748,68 @@ func (s *Shell) createProgressBar(remotePath string) ProgressCallback {
 		}),
 	)
 	return func(n int64) { _ = bar.Add64(n) }
+}
+
+// handleShell 进入远程交互式 shell（SSH PTY）
+func (s *Shell) handleShell(ctx context.Context) {
+	if err := s.client.sshClient.Shell(ctx); err != nil {
+		_, _ = fmt.Fprintf(s.stderr, "shell: %v\n", err)
+	}
+	_, _ = fmt.Fprintln(s.stdout, "")
+}
+
+// handleLshell 进入本地交互式 shell
+func (s *Shell) handleLshell(ctx context.Context) {
+	shellBin := os.Getenv("SHELL")
+	if shellBin == "" {
+		shellBin = "sh"
+	}
+	if runtime.GOOS == "windows" {
+		shellBin = "powershell.exe"
+	}
+	c := exec.CommandContext(ctx, shellBin)
+	c.Stdin = os.Stdin
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	c.Dir = s.localCwd
+	if err := c.Run(); err != nil {
+		_, _ = fmt.Fprintf(s.stderr, "lshell: %v\n", err)
+	}
+	_, _ = fmt.Fprintln(s.stdout, "")
+}
+
+// handleExec 在远程主机上执行命令，分配 PTY 以支持 vim/top 等交互式程序
+func (s *Shell) handleExec(ctx context.Context, args []string) {
+	if len(args) == 0 {
+		_, _ = fmt.Fprintln(s.stderr, i18n.T("sftp_shell_exec_usage"))
+		return
+	}
+	escapedCwd := strings.ReplaceAll(s.cwd, "'", "'\\''")
+	cmdStr := fmt.Sprintf("cd '%s' && %s", escapedCwd, strings.Join(args, " "))
+	if err := s.client.sshClient.RunInteractiveCmd(ctx, cmdStr); err != nil {
+		_, _ = fmt.Fprintf(s.stderr, "exec: %v\n", err)
+	}
+	_, _ = fmt.Fprintln(s.stdout, "")
+}
+
+// handleLexec 在本地执行命令，输出流式写入 shell 的 stdout/stderr
+func (s *Shell) handleLexec(ctx context.Context, cmdStr string) {
+	if cmdStr == "" {
+		_, _ = fmt.Fprintln(s.stderr, i18n.T("sftp_shell_lexec_usage"))
+		return
+	}
+	var c *exec.Cmd
+	if runtime.GOOS == "windows" {
+		c = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-Command", cmdStr)
+	} else {
+		c = exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	}
+	c.Stdout = s.stdout
+	c.Stderr = s.stderr
+	c.Dir = s.localCwd
+	if err := c.Run(); err != nil {
+		_, _ = fmt.Fprintf(s.stderr, "lexec: %v\n", err)
+	}
 }
 
 func formatBytes(bytes int64) string {

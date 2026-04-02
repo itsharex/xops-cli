@@ -8,17 +8,20 @@ import (
 
 // wordCompleter 实现 liner.WordCompleter 接口
 func (s *Shell) wordCompleter(line string, pos int) (head string, completions []string, tail string) {
-	content := line[:pos]
+	// liner 传入的 pos 是 rune 位置，需要转换为字节位置来切分字符串
+	runes := []rune(line)
+	content := string(runes[:pos])
+	tail = string(runes[pos:])
 
 	// 场景1：补全命令名（行首无空格）
 	if !strings.Contains(content, " ") {
-		cmds := []string{"exit", "quit", "bye", "help", "?", "pwd", "lpwd", "ls", "ll", "lls", "lll", "cd", "lcd", "mkdir", "lmkdir", "rm", "lrm", "cp", "lcp", "mv", "lmv", "get", "put"}
+		cmds := []string{"exit", "quit", "bye", "help", "?", "pwd", "lpwd", "ls", "ll", "lls", "lll", "cd", "lcd", "mkdir", "lmkdir", "rm", "lrm", "cp", "lcp", "mv", "lmv", "get", "put", "exec", "lexec", "shell", "lshell"}
 		for _, c := range cmds {
 			if strings.HasPrefix(c, content) {
 				completions = append(completions, c)
 			}
 		}
-		return "", completions, line[pos:]
+		return "", completions, tail
 	}
 
 	// 场景2：补全命令参数
@@ -36,7 +39,6 @@ func (s *Shell) wordCompleter(line string, pos int) (head string, completions []
 	// 计算出不参与本次补全的前缀部分
 	prefixLen := len(content) - len(partial)
 	head = content[:prefixLen]
-	tail = line[pos:]
 
 	switch cmd {
 	case "cd", "ls", "ll", "get", "mkdir", "rm", "cp", "mv":

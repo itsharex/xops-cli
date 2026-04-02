@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // LocalExecutor 本地执行器
@@ -92,8 +93,19 @@ func (e *LocalExecutor) InteractiveWithSudo(ctx context.Context, args []string) 
 		// 注入密码
 		_, _ = stdin.Write([]byte(e.password + "\n"))
 		// 将本地标准输入转发给进程
-		go func() { _, _ = io.Copy(stdin, os.Stdin) }()
-		return c.Wait()
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(stdin, os.Stdin)
+			close(done)
+		}()
+
+		err = c.Wait()
+		// 关键：通过设置 Stdin 的 Deadline 来中断阻塞的 Read，防止返回后 stdin 被吞字节
+		_ = os.Stdin.SetReadDeadline(time.Now())
+		<-done
+		_ = os.Stdin.SetReadDeadline(time.Time{})
+
+		return err
 	} else {
 		// 无密码模式，直接连接标准流
 		c.Stdin = os.Stdin
