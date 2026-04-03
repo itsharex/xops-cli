@@ -399,9 +399,43 @@ func (s *Shell) handleGet(ctx context.Context, args []string) {
 
 	_, _ = fmt.Fprintln(s.stdout, i18n.Tf("sftp_shell_downloading", map[string]any{"Remote": remote, "Local": local}))
 
-	progress := s.createProgressBar(remote)
+	// 计算远程文件/目录总大小以显示准确的进度条
+	info, statErr := s.client.sftpClient.Stat(remote)
+	var totalSize int64
+	description := "Downloading"
+	if statErr == nil {
+		if info.IsDir() {
+			description = "Downloading (Dir)"
+			walker := s.client.sftpClient.Walk(remote)
+			for walker.Step() {
+				if walker.Err() != nil {
+					continue
+				}
+				if fi := walker.Stat(); !fi.IsDir() {
+					totalSize += fi.Size()
+				}
+			}
+		} else {
+			totalSize = info.Size()
+		}
+	}
 
-	err := s.client.Download(ctx, remote, local, progress)
+	bar := progressbar.NewOptions64(
+		totalSize,
+		progressbar.OptionSetDescription(description),
+		progressbar.OptionSetWriter(s.stdout),
+		progressbar.OptionEnableColorCodes(true),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionOnCompletion(func() {
+			_, _ = fmt.Fprint(s.stdout, "\n")
+		}),
+	)
+	callback := func(n int64) { _ = bar.Add64(n) }
+
+	err := s.client.Download(ctx, remote, local, callback)
+	_ = bar.Finish()
 	if err != nil {
 		_, _ = fmt.Fprintf(s.stderr, "%s\n", i18n.Tf("sftp_shell_download_failed", map[string]any{"Error": err}))
 	} else {
@@ -468,6 +502,7 @@ func (s *Shell) handlePut(ctx context.Context, args []string) {
 	callback := func(n int64) { _ = bar.Add64(n) }
 
 	err = s.client.Upload(ctx, local, remote, callback)
+	_ = bar.Finish()
 	if err != nil {
 		_, _ = fmt.Fprintf(s.stderr, "%s\n", i18n.Tf("sftp_shell_upload_failed", map[string]any{"Error": err}))
 	} else {
@@ -720,34 +755,6 @@ func (s *Shell) askConfirmation(prompt string) bool {
 	}
 	response := strings.ToLower(strings.TrimSpace(input))
 	return response == "y" || response == "yes"
-}
-
-func (s *Shell) createProgressBar(remotePath string) ProgressCallback {
-	// 尝试 Stat 获取大小
-	info, err := s.client.sftpClient.Stat(remotePath)
-	total := int64(-1)
-	description := "Downloading"
-	if err == nil {
-		if !info.IsDir() {
-			total = info.Size()
-		} else {
-			description = "Downloading (Dir)"
-		}
-	}
-
-	bar := progressbar.NewOptions64(
-		total,
-		progressbar.OptionSetDescription(description),
-		progressbar.OptionSetWriter(s.stdout),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionShowBytes(true),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionThrottle(65*time.Millisecond),
-		progressbar.OptionOnCompletion(func() {
-			_, _ = fmt.Fprint(s.stdout, "\n")
-		}),
-	)
-	return func(n int64) { _ = bar.Add64(n) }
 }
 
 // handleShell 进入远程交互式 shell（SSH PTY）
